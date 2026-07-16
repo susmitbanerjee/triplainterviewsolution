@@ -1,0 +1,17 @@
+services:
+  rate-api:
+    image: tripladev/rate-api
+    ports:
+      - "8080:8080"
+
+  interview-dev:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/rails
+    environment:
+      - RATE_API_URL=${RATE_API_URL:-http://rate-api:8080}
+      - RATE_API_TOKEN=${RATE_API_TOKEN:-04aa6f42aa03f220c2ae9a276cd68c62}
+    depends_on:
+      - rate-api
