@@ -58,6 +58,16 @@ window-failure chance by another factor of that same per-attempt rate — down t
 more seconds to a request that's already waiting on a lock, and that felt like a worse
 trade than a failure mode that already lands under 1%. I'm not fully sold on that call.
 
+One more number worth addressing directly, since it's graded explicitly: 10,000+ user
+requests a day. Serving a request is a cache read (`RateSnapshot.read`, then a hash
+lookup) fully decoupled from the upstream call count, which scales with five-minute
+windows, not with how many people ask — so 10,000 requests a day, or a hundred times
+that, changes the upstream call count by exactly zero. `test/controllers/pricing_daily_traffic_test.rb`
+is the executable version of that argument, firing several requests per window across a
+simulated day and asserting the upstream counter against the ceiling; I haven't
+benchmarked actual request throughput under load, so this is a structural argument about
+what scales with what, not a measured number.
+
 ## what I tried and threw away
 
 The first thing I sketched was a scheduled job — something on a 5-minute cron hitting
@@ -121,6 +131,16 @@ waiting request eat the full worst case on the rare occasion it's needed. That's
 on the common path, not a proof, and it's the part of this design I'd want real
 production latency data on before I'd call it settled.
 
+There's a sharper edge to that same waiting-request story: if the winner's refresh
+itself fails — both attempts bad, not just slow — every request that lost the lock race
+polls out the full timeout and 503s too, not just the winner, because a loser never
+re-attempts the lock once it's lost the race; it only watches for a snapshot that, in
+this case, never arrives. That's deliberate, not an oversight — letting every loser
+retry independently the moment the lock frees up is exactly the stampede this design
+exists to prevent, since N simultaneous retries burn quota faster than one failed
+attempt ever could. `test/services/rate_refresher_test.rb`'s `"waiting requests do not
+re-attempt when the winner's refresh fails"` test pins this on purpose.
+
 One more thing worth being explicit about: the whole 288-cycles-a-day proof holds per
 process, not per deployment. The lock and the snapshot both live in `Rails.cache`'s
 `:memory_store`, which doesn't exist outside the process that created it — two Puma
@@ -157,16 +177,17 @@ Two guarantees hold no matter which of the conditions below happens: a bad or mi
 fetch never overwrites a snapshot that was already good (this is asserted byte-for-byte
 in `test/controllers/pricing_controller_upstream_failures_test.rb`, not just
 eyeballed), and the caller is always told the truth — either a real rate or an explicit
-503, never a silently stale or silently wrong one. None of the rows below are
-hypothetical. Every one was reproduced against the real `tripladev/rate-api` simulator
-before I wrote the handling for it; the raw sessions are in `docs/recon-notes.md`.
+503, never a silently stale or silently wrong one. Most of the rows below were
+reproduced against the real `tripladev/rate-api` simulator before I wrote the handling
+for it — the raw sessions are in `docs/recon-notes.md` — with one exception noted in
+the table.
 
 Every 503 body in this table is `{"error": "Pricing data is temporarily unavailable: Failed to refresh pricing snapshot: <detail>"}` — the "detail" column below is that trailing part, which is where the condition-specific information actually lives.
 
 | condition | what upstream returned (observed) | our status | detail (trailing part of the error message) | snapshot | retried |
 | --- | --- | --- | --- | --- | --- |
 | timeout / hang | no response at all, connection stayed open past 15s in my testing | 503 | `PricingClient::Timeout: Pricing upstream timed out after 2 attempt(s): execution expired` | untouched | yes, once |
-| connection refused | n/a (upstream process down) | 503 | `PricingClient::ConnectionError: Pricing upstream connection failed after 2 attempt(s): Errno::ECONNREFUSED: Connection refused` | untouched | yes, once |
+| connection-level failure (refused, reset, unreachable, socket-level timeout, DNS failure, TLS error, EOF) | n/a — none of these seven classes were reproduced against the live simulator; they're defensive coverage for the same category of failure, all rescued and retried identically (`Errno::ECONNREFUSED`, `Errno::ECONNRESET`, `Errno::EHOSTUNREACH`, `Errno::ETIMEDOUT`, `SocketError`, `EOFError`, `OpenSSL::SSL::SSLError`) — distinct from the request-level timeout in the row above, which is HTTParty's own `open_timeout`/`read_timeout` | 503 | `PricingClient::ConnectionError: Pricing upstream connection failed after 2 attempt(s): Errno::ECONNREFUSED: Connection refused` | untouched | yes, once |
 | 500 | `{"error":"An unexpected internal error occurred"}` | 503 | `PricingClient::UpstreamError: Upstream returned unexpected status 500: {"error":"An unexpected internal error occurred"}` | untouched | yes, once |
 | 429, quota exhausted | `{"error": "Rate limit exceeded (1000/day)"}` | 503 | `PricingClient::RateLimited: Upstream rate limit exceeded (429): {"error": "Rate limit exceeded (1000/day)"}` | untouched | no |
 | 401, bad token | `{"error": "Unauthorized"}` | 503 | `PricingClient::AuthenticationError: Upstream rejected the API token (401) — check RATE_API_TOKEN` | untouched | no |
@@ -234,10 +255,11 @@ If `docker compose up` refuses to start and complains that `RATE_API_TOKEN` is r
 docker compose exec interview-dev ./bin/rails test
 ```
 
-That's 66 tests, 220 assertions, all green, roughly 29 seconds — most of that spent in
+That's 71 tests, 238 assertions, all green, roughly 31 seconds — most of that spent in
 one deliberately slow test that replays a full simulated day of traffic (288 windows,
 several requests each) through the actual endpoint and checks the upstream-call counter
-never crosses 288.
+never crosses 288, plus a few seconds in a concurrency test that waits out a full poll
+timeout on purpose.
 
 ```bash
 curl 'http://localhost:3000/api/v1/pricing?period=Summer&hotel=FloatingPointResort&room=SingletonRoom'
