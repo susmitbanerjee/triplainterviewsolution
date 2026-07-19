@@ -27,7 +27,7 @@ class PricingClientTest < ActiveSupport::TestCase
     result = PricingClient.fetch_all
 
     assert_equal 36, result.size
-    assert_equal "10000", result[["Summer", "FloatingPointResort", "SingletonRoom"]]
+    assert_equal "10000", result[[ "Summer", "FloatingPointResort", "SingletonRoom" ]]
     assert result.values.all? { |v| v.is_a?(String) }
   end
 
@@ -52,7 +52,7 @@ class PricingClientTest < ActiveSupport::TestCase
 
     result = PricingClient.fetch_all
 
-    assert_equal "73000", result[["Summer", "FloatingPointResort", "SingletonRoom"]]
+    assert_equal "73000", result[[ "Summer", "FloatingPointResort", "SingletonRoom" ]]
   end
 
   test "timeout then success retries once and returns the result" do

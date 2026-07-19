@@ -12,6 +12,6 @@ services:
       - .:/rails
     environment:
       - RATE_API_URL=${RATE_API_URL:-http://rate-api:8080}
-      - RATE_API_TOKEN=${RATE_API_TOKEN:-04aa6f42aa03f220c2ae9a276cd68c62}
+      - RATE_API_TOKEN=${RATE_API_TOKEN:?RATE_API_TOKEN is required — copy .env.example to .env}
     depends_on:
       - rate-api

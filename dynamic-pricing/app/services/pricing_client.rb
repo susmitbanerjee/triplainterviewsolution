@@ -136,7 +136,7 @@ class PricingClient
     rates.each do |entry|
       raise InvalidResponse, "Rate entry is not an object: #{entry.inspect}" unless entry.is_a?(Hash)
 
-      key = [entry["period"], entry["hotel"], entry["room"]]
+      key = [ entry["period"], entry["hotel"], entry["room"] ]
       raise InvalidResponse, "Unexpected attribute combination: #{key.inspect}" unless UNIVERSE.include?(key)
       raise InvalidResponse, "Duplicate rate entry for #{key.inspect}" if result.key?(key)
 

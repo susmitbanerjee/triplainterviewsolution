@@ -4,7 +4,7 @@ class RateSnapshotTest < ActiveSupport::TestCase
   BASE_TIME = Time.zone.parse("2026-01-01 12:00:00")
 
   def sample_rates
-    { ["Summer", "FloatingPointResort", "SingletonRoom"] => "15000" }
+    { [ "Summer", "FloatingPointResort", "SingletonRoom" ] => "15000" }
   end
 
   test "read returns nil when nothing has been written" do

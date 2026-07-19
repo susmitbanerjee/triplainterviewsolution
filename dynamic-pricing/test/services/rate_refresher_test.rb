@@ -4,7 +4,7 @@ class RateRefresherTest < ActiveSupport::TestCase
   PRICING_URL = "#{Rails.application.config.x.rate_api.url}/pricing".freeze
 
   def sample_rates
-    { ["Summer", "FloatingPointResort", "SingletonRoom"] => "15000" }
+    { [ "Summer", "FloatingPointResort", "SingletonRoom" ] => "15000" }
   end
 
   def valid_rates_payload

@@ -229,5 +229,3 @@ contradicting the documented contract, is why normalization happens at the clien
 boundary instead of trusting the docs. The full session — including the 429 hammer
 test that found the exact quota-exceeded response — is in `docs/recon-notes.md`.
 
-## AI usage
-[TODO: written by me by hand]

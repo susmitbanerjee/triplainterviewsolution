@@ -29,11 +29,11 @@ class PricingQuery
 
   def compute_errors
     missing_fields = FIELDS.keys.select { |field| public_send(field).blank? }
-    return [missing_error(missing_fields)] if missing_fields.any?
+    return [ missing_error(missing_fields) ] if missing_fields.any?
 
     FIELDS.each do |field, allowed_values|
       value = public_send(field)
-      return ["#{field} must be one of: #{allowed_values.join(', ')}"] unless allowed_values.include?(value)
+      return [ "#{field} must be one of: #{allowed_values.join(', ')}" ] unless allowed_values.include?(value)
     end
 
     []

@@ -38,6 +38,6 @@ class RateSnapshot
   end
 
   def rate_for(period:, hotel:, room:)
-    rates[[period, hotel, room]]
+    rates[[ period, hotel, room ]]
   end
 end

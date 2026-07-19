@@ -11,7 +11,7 @@ class Api::V1::PricingControllerFreshnessTest < ActionDispatch::IntegrationTest
 
   def stale_rates(rate)
     PricingQuery::PERIODS.product(PricingQuery::HOTELS, PricingQuery::ROOMS).each_with_object({}) do |(period, hotel, room), h|
-      h[[period, hotel, room]] = rate
+      h[[ period, hotel, room ]] = rate
     end
   end
 
