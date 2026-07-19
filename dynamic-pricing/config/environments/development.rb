@@ -27,7 +27,10 @@ Rails.application.configure do
   else
     config.action_controller.perform_caching = false
 
-    config.cache_store = :null_store
+    # RateSnapshot relies on Rails.cache for storage, so a real store is
+    # needed regardless of the `rails dev:cache` fragment-caching toggle
+    # above; :null_store would silently discard every write.
+    config.cache_store = :memory_store
   end
 
   # Print deprecation notices to the Rails logger.
