@@ -9,6 +9,12 @@ class Api::V1::PricingControllerTest < ActionDispatch::IntegrationTest
     end
   end
 
+  def sample_rates
+    PricingQuery::PERIODS.product(PricingQuery::HOTELS, PricingQuery::ROOMS).each_with_object({}) do |(period, hotel, room), h|
+      h[[period, hotel, room]] = "9999"
+    end
+  end
+
   test "should get pricing with all parameters" do
     stub_request(:post, RATE_API_PRICING_URL).to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
 
@@ -39,6 +45,46 @@ class Api::V1::PricingControllerTest < ActionDispatch::IntegrationTest
 
     json_response = JSON.parse(@response.body)
     assert_includes json_response["error"], "temporarily unavailable"
+  end
+
+  test "logs a structured pricing.request line with cache: refreshed on a cold fetch" do
+    stub_request(:post, RATE_API_PRICING_URL).to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
+
+    logs = capture_structured_logs do
+      get api_v1_pricing_url, params: { period: "Summer", hotel: "FloatingPointResort", room: "SingletonRoom" }
+    end
+
+    entry = JSON.parse(logs.lines.find { |l| l.include?('"event":"pricing.request"') })
+    assert_equal "pricing.request", entry["event"]
+    assert_equal "refreshed", entry["cache"]
+    assert_equal 200, entry["status"]
+    assert entry.key?("request_id")
+    assert_kind_of Integer, entry["duration_ms"]
+  end
+
+  test "logs a structured pricing.request line with cache: hit when already fresh" do
+    travel_to(1.minute.ago) { RateSnapshot.write(sample_rates) }
+
+    logs = capture_structured_logs do
+      get api_v1_pricing_url, params: { period: "Summer", hotel: "FloatingPointResort", room: "SingletonRoom" }
+    end
+
+    entry = JSON.parse(logs.lines.find { |l| l.include?('"event":"pricing.request"') })
+    assert_equal "hit", entry["cache"]
+    assert_equal 200, entry["status"]
+    assert_not_requested :post, RATE_API_PRICING_URL
+  end
+
+  test "logs a structured pricing.request line with cache: unavailable on failure" do
+    stub_request(:post, RATE_API_PRICING_URL).to_return(status: 401, body: { error: "Unauthorized" }.to_json)
+
+    logs = capture_structured_logs do
+      get api_v1_pricing_url, params: { period: "Summer", hotel: "FloatingPointResort", room: "SingletonRoom" }
+    end
+
+    entry = JSON.parse(logs.lines.find { |l| l.include?('"event":"pricing.request"') })
+    assert_equal "unavailable", entry["cache"]
+    assert_equal 503, entry["status"]
   end
 
   test "should reject when period is missing" do

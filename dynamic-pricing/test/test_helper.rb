@@ -17,5 +17,18 @@ class ActiveSupport::TestCase
   # persists across test cases within this process, so clear it between tests.
   setup { Rails.cache.clear }
 
-  # Add more helper methods to be used by all tests here...
+  # Swaps Rails.logger for one that writes exactly the given message per
+  # line (no Logger timestamp/severity prefix), so StructuredLogger's JSON
+  # lines can be parsed back out directly. Returns the captured output.
+  def capture_structured_logs
+    original_logger = Rails.logger
+    io = StringIO.new
+    logger = Logger.new(io)
+    logger.formatter = proc { |_severity, _time, _progname, msg| "#{msg}\n" }
+    Rails.logger = logger
+    yield
+    io.string
+  ensure
+    Rails.logger = original_logger
+  end
 end

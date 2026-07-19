@@ -13,8 +13,22 @@ class PricingClient
 
   UNIVERSE = PricingQuery::PERIODS.product(PricingQuery::HOTELS, PricingQuery::ROOMS).freeze
 
+  UPSTREAM_CALLS_CACHE_PREFIX = "pricing:upstream_calls"
+  UPSTREAM_CALLS_TTL = 48.hours
+  # Worst case under correct single-flight coordination is 288/day (one call
+  # per 5-minute window). Anything past 500 means that guarantee is broken.
+  UPSTREAM_CALLS_WARN_THRESHOLD = 500
+
   def self.fetch_all
     new.fetch_all
+  end
+
+  def self.upstream_calls_today
+    Rails.cache.read(upstream_calls_cache_key) || 0
+  end
+
+  def self.upstream_calls_cache_key(date = Date.current)
+    "#{UPSTREAM_CALLS_CACHE_PREFIX}:#{date}"
   end
 
   def fetch_all
@@ -56,6 +70,8 @@ class PricingClient
   end
 
   def post_batch
+    record_upstream_call!
+
     HTTParty.post(
       pricing_url,
       headers: {
@@ -65,6 +81,19 @@ class PricingClient
       body: request_body,
       open_timeout: OPEN_TIMEOUT,
       read_timeout: READ_TIMEOUT
+    )
+  end
+
+  # Counts every actual HTTP attempt, including retries — incremented before
+  # the request goes out, not after, so a hung/timed-out attempt still counts.
+  def record_upstream_call!
+    count = Rails.cache.increment(self.class.upstream_calls_cache_key, 1, expires_in: UPSTREAM_CALLS_TTL)
+    return unless count && count > UPSTREAM_CALLS_WARN_THRESHOLD
+
+    StructuredLogger.warn(
+      event: "pricing.upstream_calls_exceeded",
+      upstream_calls_today: count,
+      threshold: UPSTREAM_CALLS_WARN_THRESHOLD
     )
   end
 

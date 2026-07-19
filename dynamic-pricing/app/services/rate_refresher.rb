@@ -62,14 +62,40 @@ class RateRefresher
     snapshot = RateSnapshot.read
     return snapshot if snapshot&.fresh?
 
+    started_at = monotonic_now
+
     begin
       rates = PricingClient.fetch_all
     rescue PricingClient::Error => e
+      log_refresh(outcome: outcome_for(e), started_at:)
       # Existing snapshot (stale or otherwise) is left exactly as-is.
       raise RefreshFailed, "Failed to refresh pricing snapshot: #{e.class}: #{e.message}"
     end
 
+    log_refresh(outcome: "success", started_at:)
     RateSnapshot.write(rates)
+  end
+
+  def outcome_for(error)
+    case error
+    when PricingClient::RateLimited
+      "rate_limited"
+    when PricingClient::InvalidResponse
+      "invalid_response"
+    when PricingClient::Timeout, PricingClient::ConnectionError
+      "timeout"
+    else
+      "upstream_error"
+    end
+  end
+
+  def log_refresh(outcome:, started_at:)
+    StructuredLogger.info(
+      event: "rates.refresh",
+      outcome: outcome,
+      duration_ms: elapsed_ms(started_at),
+      upstream_calls_today: PricingClient.upstream_calls_today
+    )
   end
 
   def acquire_lock
@@ -105,5 +131,9 @@ class RateRefresher
   # in real wall-clock time regardless of any simulated time elsewhere.
   def monotonic_now
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def elapsed_ms(started_at)
+    ((monotonic_now - started_at) * 1000).round
   end
 end

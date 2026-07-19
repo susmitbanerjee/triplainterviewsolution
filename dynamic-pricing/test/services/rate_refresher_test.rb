@@ -91,4 +91,44 @@ class RateRefresherTest < ActiveSupport::TestCase
 
     assert_requested :post, PRICING_URL, times: 1
   end
+
+  test "logs a structured rates.refresh line with outcome: success" do
+    write_stale_snapshot
+    stub_request(:post, PRICING_URL).to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
+
+    logs = capture_structured_logs { RateRefresher.ensure_fresh! }
+
+    entry = JSON.parse(logs.lines.find { |l| l.include?('"event":"rates.refresh"') })
+    assert_equal "rates.refresh", entry["event"]
+    assert_equal "success", entry["outcome"]
+    assert_kind_of Integer, entry["duration_ms"]
+    assert_equal 1, entry["upstream_calls_today"]
+  end
+
+  test "logs a structured rates.refresh line with a condition-specific outcome on failure" do
+    write_stale_snapshot
+    stub_request(:post, PRICING_URL).to_return(status: 429, body: { error: "Rate limit exceeded (1000/day)" }.to_json)
+
+    logs = capture_structured_logs do
+      assert_raises(RateRefresher::RefreshFailed) { RateRefresher.ensure_fresh! }
+    end
+
+    entry = JSON.parse(logs.lines.find { |l| l.include?('"event":"rates.refresh"') })
+    assert_equal "rate_limited", entry["outcome"]
+  end
+
+  test "does not log rates.refresh when the double-check finds the snapshot already fresh" do
+    stale = RateSnapshot.new(fetched_at: 10.minutes.ago, rates: sample_rates)
+    fresh = RateSnapshot.new(fetched_at: Time.current, rates: sample_rates)
+
+    read_count = 0
+    reader = lambda do
+      read_count += 1
+      read_count == 1 ? stale : fresh
+    end
+
+    logs = capture_structured_logs { RateSnapshot.stub(:read, reader) { RateRefresher.ensure_fresh! } }
+
+    assert_nil logs.lines.find { |l| l.include?('"event":"rates.refresh"') }
+  end
 end
