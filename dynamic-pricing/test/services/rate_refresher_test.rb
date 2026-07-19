@@ -41,6 +41,44 @@ class RateRefresherTest < ActiveSupport::TestCase
     end
   end
 
+  test "waiting requests do not re-attempt when the winner's refresh fails" do
+    write_stale_snapshot
+    original = RateSnapshot.read
+
+    request_count = 0
+    count_mutex = Mutex.new
+
+    stub_request(:post, PRICING_URL).to_return do
+      count_mutex.synchronize { request_count += 1 }
+      { status: 500, body: { error: "boom" }.to_json }
+    end
+
+    threads = 10.times.map do
+      Thread.new do
+        begin
+          RateRefresher.ensure_fresh!
+        rescue RateRefresher::Error => e
+          e
+        end
+      end
+    end
+    results = threads.map(&:value)
+
+    # Exactly the winner's two attempts (MAX_ATTEMPTS) — no waiting thread
+    # ever calls acquire_lock again after losing the race, so a failed
+    # refresh does not turn into a stampede of retries.
+    assert_equal 2, request_count
+    assert_requested :post, PRICING_URL, times: 2
+
+    assert_equal 10, results.size
+    assert results.all? { |r| r.is_a?(RateRefresher::Error) },
+      "expected every thread to end in a RateRefresher::Error, got: #{results.map(&:class).uniq}"
+
+    unchanged = RateSnapshot.read
+    assert_equal original.fetched_at, unchanged.fetched_at
+    assert_equal original.rates, unchanged.rates
+  end
+
   test "double-check: lock acquired but snapshot already fresh makes zero upstream calls" do
     stale = RateSnapshot.new(fetched_at: 10.minutes.ago, rates: sample_rates)
     fresh = RateSnapshot.new(fetched_at: Time.current, rates: sample_rates)
@@ -115,6 +153,18 @@ class RateRefresherTest < ActiveSupport::TestCase
 
     entry = JSON.parse(logs.lines.find { |l| l.include?('"event":"rates.refresh"') })
     assert_equal "rate_limited", entry["outcome"]
+  end
+
+  test "logs outcome: authentication_error on a 401, distinct from generic upstream_error" do
+    write_stale_snapshot
+    stub_request(:post, PRICING_URL).to_return(status: 401, body: { error: "Unauthorized" }.to_json)
+
+    logs = capture_structured_logs do
+      assert_raises(RateRefresher::RefreshFailed) { RateRefresher.ensure_fresh! }
+    end
+
+    entry = JSON.parse(logs.lines.find { |l| l.include?('"event":"rates.refresh"') })
+    assert_equal "authentication_error", entry["outcome"]
   end
 
   test "does not log rates.refresh when the double-check finds the snapshot already fresh" do

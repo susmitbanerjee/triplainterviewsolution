@@ -82,6 +82,8 @@ class RateRefresher
     case error
     when PricingClient::RateLimited
       "rate_limited"
+    when PricingClient::AuthenticationError
+      "authentication_error"
     when PricingClient::InvalidResponse
       "invalid_response"
     when PricingClient::Timeout, PricingClient::ConnectionError

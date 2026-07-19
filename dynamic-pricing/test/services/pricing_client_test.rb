@@ -216,6 +216,24 @@ class PricingClientTest < ActiveSupport::TestCase
     assert_requested(:post, PRICING_URL, times: 2)
   end
 
+  test "SocketError is retried once and raises ConnectionError on the second failure" do
+    stub_request(:post, PRICING_URL).to_raise(SocketError.new("getaddrinfo: Name or service not known"))
+
+    assert_raises(PricingClient::ConnectionError) { PricingClient.fetch_all }
+    assert_requested(:post, PRICING_URL, times: 2)
+  end
+
+  test "SocketError then success retries once and returns the result" do
+    stub_request(:post, PRICING_URL)
+      .to_raise(SocketError.new("getaddrinfo: Name or service not known"))
+      .then.to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
+
+    result = PricingClient.fetch_all
+
+    assert_equal 36, result.size
+    assert_requested(:post, PRICING_URL, times: 2)
+  end
+
   test "upstream_calls_today counts every attempt, including retries" do
     stub_request(:post, PRICING_URL)
       .to_return(status: 500, body: { error: "boom" }.to_json)

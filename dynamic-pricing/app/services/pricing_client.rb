@@ -58,7 +58,8 @@ class PricingClient
 
         sleep(jittered_delay)
         next
-      rescue Errno::ECONNREFUSED => e
+      rescue Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::EHOSTUNREACH, Errno::ETIMEDOUT,
+             SocketError, EOFError, OpenSSL::SSL::SSLError => e
         raise ConnectionError, "Pricing upstream connection failed after #{attempt} attempt(s): #{e.class}: #{e.message}" if last_attempt
 
         sleep(jittered_delay)

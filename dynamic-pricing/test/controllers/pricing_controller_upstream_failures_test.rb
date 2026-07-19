@@ -62,6 +62,12 @@ class Api::V1::PricingControllerUpstreamFailuresTest < ActionDispatch::Integrati
     end
   end
 
+  test "SocketError (DNS failure) yields 503, leaves snapshot untouched, retries exactly once" do
+    assert_upstream_failure_yields_503(expected_request_count: 2, message_pattern: /connection.*failed/i) do
+      stub_request(:post, PRICING_UPSTREAM_URL).to_raise(SocketError.new("getaddrinfo: Name or service not known"))
+    end
+  end
+
   test "500 yields 503, leaves snapshot untouched, retries exactly once" do
     assert_upstream_failure_yields_503(expected_request_count: 2, message_pattern: /500/) do
       stub_request(:post, PRICING_UPSTREAM_URL).to_return(status: 500, body: { error: "boom" }.to_json)
