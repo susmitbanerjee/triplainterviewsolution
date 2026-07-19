@@ -41,19 +41,22 @@ caching before I even have to think about concurrency.
 | snapshot worst case, one retry each (288 x 2) | 576 |
 
 The retry policy adds one more multiplier. `PricingClient::MAX_ATTEMPTS` is 2 — one
-retry, only on timeout or 5xx, never on 4xx — so the absolute worst case is 288 windows
-times 2 attempts, 576 calls, still comfortably under 1,000. And given the roughly
-5-10% per-attempt failure rate I measured against the real simulator, one retry drops
-the chance that a whole window fails outright (both attempts bad) to somewhere around
-0.25% to 1%. That's the number I'm actually optimizing: not "does upstream ever fail"
-but "how often does a user see a 503 because of it."
+retry on any transient failure (timeout, connection error, 5xx, or a fake-success 200
+that fails content validation), never on 429 or other 4xx — so the absolute worst case
+is 288 windows times 2 attempts, 576 calls, still comfortably under 1,000. Retrying the
+content-validation failures too is what actually makes the next number hold: given the
+roughly 5-10% per-attempt failure rate I measured against the real simulator — and that
+rate now covers all of those transient conditions, not just timeout/5xx — a window only
+fails when two attempts in a row both go bad, which is that rate squared: 0.25% to 1%.
+That's the number I'm actually optimizing: not "does upstream ever fail" but "how often
+does a user see a 503 because of it."
 
-I went back and forth on whether one retry is enough. At the high end of that observed
-failure range, a second retry would cut the window-failure chance roughly in half
-again, and there's plenty of quota headroom to afford it — 576 of 1,000 leaves 424 to
-spare. I landed on one anyway, mostly because every extra attempt adds up to 5 more
-seconds to a request that's already waiting on a lock, and that felt like a worse trade
-than a failure mode that already lands under 1%. I'm not fully sold on that call.
+I went back and forth on whether one retry is enough. A second retry would cut the
+window-failure chance by another factor of that same per-attempt rate — down to roughly
+0.01% to 0.1% — and there's plenty of quota headroom to afford it: 576 of 1,000 leaves
+424 to spare. I landed on one anyway, mostly because every extra attempt adds up to 5
+more seconds to a request that's already waiting on a lock, and that felt like a worse
+trade than a failure mode that already lands under 1%. I'm not fully sold on that call.
 
 ## what I tried and threw away
 
@@ -118,6 +121,36 @@ waiting request eat the full worst case on the rare occasion it's needed. That's
 on the common path, not a proof, and it's the part of this design I'd want real
 production latency data on before I'd call it settled.
 
+One more thing worth being explicit about: the whole 288-cycles-a-day proof holds per
+process, not per deployment. The lock and the snapshot both live in `Rails.cache`'s
+`:memory_store`, which doesn't exist outside the process that created it — two Puma
+workers would each think they're the only one talking to upstream, and the real call
+count would multiply by however many workers are running. `config/puma.rb` pins this to
+single-process mode on purpose, with a comment explaining why, rather than leaving it as
+an accident of whatever `WEB_CONCURRENCY` happens to be set to in a given environment.
+Scaling out from here doesn't mean rewriting the coordination logic — it means swapping
+`Rails.cache` for a real shared store (Redis, say), at which point the exact same
+`unless_exist` lock becomes a genuine distributed `SET NX EX` and nothing else in
+`RateRefresher` has to change.
+
+## proving it in production
+
+Two structured log lines carry the observability load here, both single-line JSON via
+`StructuredLogger`, both already written rather than bolted on for this README.
+`pricing.request` fires once per request that reaches the snapshot lookup: `event`,
+`request_id`, `cache` (`hit`, `refreshed`, or `unavailable`), `status`, `duration_ms`.
+`rates.refresh` fires once per actual attempt to talk to `PricingClient`: `event`,
+`outcome` (`success`, `rate_limited`, `invalid_response`, `timeout`, or
+`upstream_error`), `duration_ms`, `upstream_calls_today`.
+
+That last field is on every single `rates.refresh` line on purpose. "the math" above is
+a claim about a number — at most 576 upstream calls a day — and a claim you can't
+observe in production isn't proven, it's asserted. Logging the running count on every
+refresh line means anyone watching logs can see the actual number track against the
+ceiling in real time, not just trust that the tests pass. `PricingClient` also logs a
+WARN once that counter crosses 500; what that means and why it's an alarm rather than a
+breaker is covered in "where this design breaks."
+
 ## when the upstream misbehaves
 
 Two guarantees hold no matter which of the conditions below happens: a bad or missing
@@ -136,10 +169,10 @@ Every 503 body in this table is `{"error": "Pricing data is temporarily unavaila
 | connection refused | n/a (upstream process down) | 503 | `PricingClient::ConnectionError: Pricing upstream connection failed after 2 attempt(s): Errno::ECONNREFUSED: Connection refused` | untouched | yes, once |
 | 500 | `{"error":"An unexpected internal error occurred"}` | 503 | `PricingClient::UpstreamError: Upstream returned unexpected status 500: {"error":"An unexpected internal error occurred"}` | untouched | yes, once |
 | 429, quota exhausted | `{"error": "Rate limit exceeded (1000/day)"}` | 503 | `PricingClient::RateLimited: Upstream rate limit exceeded (429): {"error": "Rate limit exceeded (1000/day)"}` | untouched | no |
-| 401, bad token | `{"error": "Unauthorized"}` | 503 | `PricingClient::UpstreamError: Upstream returned unexpected status 401: {"error": "Unauthorized"}` | untouched | no |
-| response isn't valid JSON | (our test) `200` with a truncated body; separately, sending upstream a malformed *request* got back an HTML 400 page, not JSON, in recon | 503 | `PricingClient::InvalidResponse: Upstream response was not valid JSON: unexpected token at ...` | untouched | no |
-| 200 with an error-shaped body | `{"message":"Failed to process rates due to an intermittent issue.","status":"error"}`, HTTP 200 | 503 | `PricingClient::InvalidResponse: Response missing a "rates" array` | untouched | no |
-| 200, a rate object missing its `rate` key | observed on an otherwise normally-shaped 200 | 503 | `PricingClient::InvalidResponse: Non-numeric rate for ["Summer", "FloatingPointResort", "SingletonRoom"]: nil` | untouched | no |
+| 401, bad token | `{"error": "Unauthorized"}` | 503 | `PricingClient::AuthenticationError: Upstream rejected the API token (401) — check RATE_API_TOKEN` | untouched | no |
+| response isn't valid JSON | (our test) `200` with a truncated body; separately, sending upstream a malformed *request* got back an HTML 400 page, not JSON, in recon | 503 | `PricingClient::InvalidResponse: Upstream response was not valid JSON: unexpected token at ...` | untouched | yes, once |
+| 200 with an error-shaped body | `{"message":"Failed to process rates due to an intermittent issue.","status":"error"}`, HTTP 200 | 503 | `PricingClient::InvalidResponse: Response missing a "rates" array` | untouched | yes, once |
+| 200, a rate object missing its `rate` key | observed on an otherwise normally-shaped 200 | 503 | `PricingClient::InvalidResponse: Non-numeric rate for ["Summer", "FloatingPointResort", "SingletonRoom"]: nil` | untouched | yes, once |
 | 200, `rate` sent as a JSON integer instead of a string | e.g. `"rate": 73000` instead of `"rate": "73000"` | **200**, not an error | n/a — accepted, normalized to `"73000"` | updated | n/a |
 
 That last row is deliberate, not an oversight — more on it in the next section.
@@ -172,6 +205,11 @@ like the wrong trade. That's pinned too, in
 `test/services/pricing_client_test.rb` ("accepts integer rate values and normalizes
 them to strings").
 
+One small departure from the scaffold, while I'm on the subject of deliberate choices:
+validation failures return 422 now, not the scaffold's original 400. 422 is the more
+accurate signal that the request was well-formed but semantically invalid, and it's the
+kind of failure a client should never blindly retry.
+
 ## running it
 
 ```bash
@@ -189,18 +227,21 @@ without hunting for a secret first.
 and `rate-api` are two separate containers on the same compose network, and from inside
 `interview-dev`, `localhost` means `interview-dev` itself, not its sibling.
 
+If `docker compose up` refuses to start and complains that `RATE_API_TOKEN` is required,
+`.env` is missing or empty — go back and run the `cp .env.example .env` step above.
+
 ```bash
 docker compose exec interview-dev ./bin/rails test
 ```
 
-That's 60 tests, 194 assertions, all green, roughly 26 seconds — most of that spent in
+That's 66 tests, 220 assertions, all green, roughly 29 seconds — most of that spent in
 one deliberately slow test that replays a full simulated day of traffic (288 windows,
 several requests each) through the actual endpoint and checks the upstream-call counter
 never crosses 288.
 
 ```bash
 curl 'http://localhost:3000/api/v1/pricing?period=Summer&hotel=FloatingPointResort&room=SingletonRoom'
-# {"rate":"69400"}
+# {"rate":"14200","fetched_at":"2026-07-19T12:07:23Z"}
 ```
 
 ## where this design breaks
@@ -228,4 +269,18 @@ upstream to ever give up; and the int-vs-string instability in the `rate` field,
 contradicting the documented contract, is why normalization happens at the client
 boundary instead of trusting the docs. The full session — including the 429 hammer
 test that found the exact quota-exceeded response — is in `docs/recon-notes.md`.
+
+## AI usage
+I used Claude (chat) to pressure-test my initial analysis of the assignment and 
+Claude Code to implement it, working from step-scoped prompts  one step per commit, 
+in the order the git history shows. The recon against the live simulator (docs/recon-notes.md) 
+was done by hand with curl and a small hammer script, and its findings drove several 
+design decisions the assistant then implemented: content validation as the definition
+of success, client-side timeouts, and rate-type normalization. Before every commit 
+I reviewed the full diff and ran the test suite. The core design calls the 
+single-snapshot invariant, bulk-fetch-per-window, strict 5-minute freshness over 
+stale-while-revalidate, and the retry budget arithmetic came out of my own analysis 
+of the constraints. Where I disagreed with generated code or found gaps 
+(for example, the retry policy initially not covering fake-success 200s), 
+I caught it in review and had it fixed.
 
