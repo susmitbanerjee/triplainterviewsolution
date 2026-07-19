@@ -1,6 +1,7 @@
 class PricingClient
   class Error < StandardError; end
   class Timeout < Error; end
+  class ConnectionError < Error; end
   class UpstreamError < Error; end
   class RateLimited < UpstreamError; end
   class InvalidResponse < Error; end
@@ -35,6 +36,11 @@ class PricingClient
         response = post_batch
       rescue ::Timeout::Error => e
         raise Timeout, "Pricing upstream timed out after #{attempt} attempt(s): #{e.message}" if attempt == MAX_ATTEMPTS
+
+        sleep(jittered_delay)
+        next
+      rescue Errno::ECONNREFUSED => e
+        raise ConnectionError, "Pricing upstream connection failed after #{attempt} attempt(s): #{e.class}: #{e.message}" if attempt == MAX_ATTEMPTS
 
         sleep(jittered_delay)
         next

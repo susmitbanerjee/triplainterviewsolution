@@ -3,46 +3,42 @@ require "test_helper"
 class Api::V1::PricingControllerTest < ActionDispatch::IntegrationTest
   RATE_API_PRICING_URL = "#{Rails.application.config.x.rate_api.url}/pricing".freeze
 
-  test "should get pricing with all parameters" do
-    mock_body = {
-      'rates' => [
-        { 'period' => 'Summer', 'hotel' => 'FloatingPointResort', 'room' => 'SingletonRoom', 'rate' => '15000' }
-      ]
-    }.to_json
-
-    mock_response = OpenStruct.new(success?: true, body: mock_body)
-
-    RateApiClient.stub(:get_rate, mock_response) do
-      get api_v1_pricing_url, params: {
-        period: "Summer",
-        hotel: "FloatingPointResort",
-        room: "SingletonRoom"
-      }
-
-      assert_response :success
-      assert_equal "application/json", @response.media_type
-
-      json_response = JSON.parse(@response.body)
-      assert_equal "15000", json_response["rate"]
+  def valid_rates_payload
+    PricingQuery::PERIODS.product(PricingQuery::HOTELS, PricingQuery::ROOMS).map.with_index do |(period, hotel, room), i|
+      { "period" => period, "hotel" => hotel, "room" => room, "rate" => (10_000 + i).to_s }
     end
   end
 
-  test "should return error when rate API fails" do
-    mock_response = OpenStruct.new(success?: false, body: { 'error' => 'Rate not found' })
+  test "should get pricing with all parameters" do
+    stub_request(:post, RATE_API_PRICING_URL).to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
 
-    RateApiClient.stub(:get_rate, mock_response) do
-      get api_v1_pricing_url, params: {
-        period: "Summer",
-        hotel: "FloatingPointResort",
-        room: "SingletonRoom"
-      }
+    get api_v1_pricing_url, params: {
+      period: "Summer",
+      hotel: "FloatingPointResort",
+      room: "SingletonRoom"
+    }
 
-      assert_response :bad_request
-      assert_equal "application/json", @response.media_type
+    assert_response :success
+    assert_equal "application/json", @response.media_type
 
-      json_response = JSON.parse(@response.body)
-      assert_includes json_response["error"], "Rate not found"
-    end
+    json_response = JSON.parse(@response.body)
+    assert_equal "10000", json_response["rate"]
+  end
+
+  test "should return 503 when the rate API fails" do
+    stub_request(:post, RATE_API_PRICING_URL).to_return(status: 401, body: { error: "Unauthorized" }.to_json)
+
+    get api_v1_pricing_url, params: {
+      period: "Summer",
+      hotel: "FloatingPointResort",
+      room: "SingletonRoom"
+    }
+
+    assert_response :service_unavailable
+    assert_equal "application/json", @response.media_type
+
+    json_response = JSON.parse(@response.body)
+    assert_includes json_response["error"], "temporarily unavailable"
   end
 
   test "should reject when period is missing" do
