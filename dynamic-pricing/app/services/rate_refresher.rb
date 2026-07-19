@@ -54,10 +54,12 @@ class RateRefresher
   # Runs only while holding the lock. Re-checks freshness first: another
   # holder may have refreshed and released between our first read above and
   # our acquiring the lock (e.g. we acquired it only because they had just
-  # released it). This re-check is the structural guarantee that upstream
-  # is ever called at most once per freshness window (<=288 calls/day):
-  # PricingClient.fetch_all is reachable only from inside this method, only
-  # while holding the lock, only when the snapshot is still stale.
+  # released it). This re-check is the structural guarantee that
+  # PricingClient.fetch_all is invoked at most once per freshness window
+  # (288/day): it is reachable only from inside this method, only while
+  # holding the lock, only when the snapshot is still stale. PricingClient's
+  # own retry policy can turn each invocation into up to 2 raw upstream
+  # calls, for a 576/day worst case — see PricingClient::UPSTREAM_CALLS_WARN_THRESHOLD.
   def refresh_if_still_stale
     snapshot = RateSnapshot.read
     return snapshot if snapshot&.fresh?

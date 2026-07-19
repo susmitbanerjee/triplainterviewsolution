@@ -18,6 +18,12 @@ class PricingClientTest < ActiveSupport::TestCase
     }
   end
 
+  # The real simulator's observed fake-success shape (docs/recon-notes.md):
+  # HTTP 200, but no "rates" key at all.
+  def fake_success_body
+    { message: "Failed to process rates due to an intermittent issue.", status: "error" }.to_json
+  end
+
   test "happy path returns 36 rates keyed by [period, hotel, room]" do
     stub_request(:post, PRICING_URL).to_return(
       status: 200,
@@ -91,10 +97,11 @@ class PricingClientTest < ActiveSupport::TestCase
     assert_requested(:post, PRICING_URL, times: 2)
   end
 
-  test "401 is not retried" do
+  test "401 is not retried and raises AuthenticationError" do
     stub_request(:post, PRICING_URL).to_return(status: 401, body: { error: "Unauthorized" }.to_json)
 
-    assert_raises(PricingClient::UpstreamError) { PricingClient.fetch_all }
+    error = assert_raises(PricingClient::AuthenticationError) { PricingClient.fetch_all }
+    assert_equal "Upstream rejected the API token (401) — check RATE_API_TOKEN", error.message
     assert_requested(:post, PRICING_URL, times: 1)
   end
 
@@ -112,45 +119,83 @@ class PricingClientTest < ActiveSupport::TestCase
     assert_requested(:post, PRICING_URL, times: 1)
   end
 
-  test "200 with a missing rate value raises InvalidResponse" do
+  test "200 with a missing rate value raises InvalidResponse after one retry" do
     payload = valid_rates_payload
     payload.first.delete("rate")
 
     stub_request(:post, PRICING_URL).to_return(status: 200, body: { rates: payload }.to_json)
 
     assert_raises(PricingClient::InvalidResponse) { PricingClient.fetch_all }
+    assert_requested(:post, PRICING_URL, times: 2)
   end
 
-  test "200 with an extra rate entry raises InvalidResponse" do
+  test "200 with an extra rate entry raises InvalidResponse after one retry" do
     payload = valid_rates_payload
     payload << payload.first.dup
 
     stub_request(:post, PRICING_URL).to_return(status: 200, body: { rates: payload }.to_json)
 
     assert_raises(PricingClient::InvalidResponse) { PricingClient.fetch_all }
+    assert_requested(:post, PRICING_URL, times: 2)
   end
 
-  test "200 with a non-numeric rate raises InvalidResponse" do
+  test "200 with a non-numeric rate raises InvalidResponse after one retry" do
     payload = valid_rates_payload
     payload.first["rate"] = "not-a-number"
 
     stub_request(:post, PRICING_URL).to_return(status: 200, body: { rates: payload }.to_json)
 
     assert_raises(PricingClient::InvalidResponse) { PricingClient.fetch_all }
+    assert_requested(:post, PRICING_URL, times: 2)
   end
 
-  test "200 with malformed JSON raises InvalidResponse" do
+  test "200 with malformed JSON raises InvalidResponse after one retry" do
     stub_request(:post, PRICING_URL).to_return(status: 200, body: "{not valid json")
 
     assert_raises(PricingClient::InvalidResponse) { PricingClient.fetch_all }
+    assert_requested(:post, PRICING_URL, times: 2)
   end
 
-  test "200 with a rates array of the wrong size raises InvalidResponse" do
+  test "200 with a rates array of the wrong size raises InvalidResponse after one retry" do
     payload = valid_rates_payload[0..-2]
 
     stub_request(:post, PRICING_URL).to_return(status: 200, body: { rates: payload }.to_json)
 
     assert_raises(PricingClient::InvalidResponse) { PricingClient.fetch_all }
+    assert_requested(:post, PRICING_URL, times: 2)
+  end
+
+  test "fake-success (200 with an error-shaped body) then a valid 200 retries once and succeeds" do
+    stub_request(:post, PRICING_URL)
+      .to_return(status: 200, body: fake_success_body)
+      .then.to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
+
+    result = PricingClient.fetch_all
+
+    assert_equal 36, result.size
+    assert_requested(:post, PRICING_URL, times: 2)
+  end
+
+  test "fake-success twice raises InvalidResponse after one retry" do
+    stub_request(:post, PRICING_URL).to_return(status: 200, body: fake_success_body)
+
+    assert_raises(PricingClient::InvalidResponse) { PricingClient.fetch_all }
+    assert_requested(:post, PRICING_URL, times: 2)
+  end
+
+  test "missing rate key then a valid 200 retries once and succeeds" do
+    broken_payload = valid_rates_payload
+    broken_payload.first.delete("rate")
+
+    stub_request(:post, PRICING_URL)
+      .to_return(status: 200, body: { rates: broken_payload }.to_json)
+      .then.to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
+
+    result = PricingClient.fetch_all
+
+    assert_equal 36, result.size
+    assert_equal "10000", result[[ "Summer", "FloatingPointResort", "SingletonRoom" ]]
+    assert_requested(:post, PRICING_URL, times: 2)
   end
 
   test "connection refused is retried once and raises ConnectionError on the second failure" do
@@ -174,6 +219,18 @@ class PricingClientTest < ActiveSupport::TestCase
   test "upstream_calls_today counts every attempt, including retries" do
     stub_request(:post, PRICING_URL)
       .to_return(status: 500, body: { error: "boom" }.to_json)
+      .then.to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
+
+    assert_equal 0, PricingClient.upstream_calls_today
+
+    PricingClient.fetch_all
+
+    assert_equal 2, PricingClient.upstream_calls_today
+  end
+
+  test "upstream_calls_today counts both attempts when a fake-success retry occurs" do
+    stub_request(:post, PRICING_URL)
+      .to_return(status: 200, body: fake_success_body)
       .then.to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
 
     assert_equal 0, PricingClient.upstream_calls_today

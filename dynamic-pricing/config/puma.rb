@@ -13,20 +13,14 @@ threads min_threads_count, max_threads_count
 
 rails_env = ENV.fetch("RAILS_ENV") { "development" }
 
-if rails_env == "production"
-  # If you are running more than 1 thread per process, the workers count
-  # should be equal to the number of processors (CPU cores) in production.
-  #
-  # It defaults to 1 because it's impossible to reliably detect how many
-  # CPU cores are available. Make sure to set the `WEB_CONCURRENCY` environment
-  # variable to match the number of processors.
-  worker_count = Integer(ENV.fetch("WEB_CONCURRENCY") { 1 })
-  if worker_count > 1
-    workers worker_count
-  else
-    preload_app!
-  end
-end
+# Pinned to single-process mode, deliberately, regardless of WEB_CONCURRENCY:
+# the pricing snapshot and the refresh lock both live in Rails.cache's
+# :memory_store, which is per-process. The budget guarantee (max 288 refresh
+# cycles/day) assumes one process. Scaling to clustered mode requires moving
+# Rails.cache to a shared store (Redis), at which point the same unless_exist
+# lock becomes a true distributed SET NX EX with no other code changes.
+preload_app! if rails_env == "production"
+
 # Specifies the `worker_timeout` threshold that Puma will use to wait before
 # terminating a worker in development environments.
 worker_timeout 3600 if ENV.fetch("RAILS_ENV", "development") == "development"

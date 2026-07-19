@@ -29,6 +29,7 @@ class Api::V1::PricingControllerTest < ActionDispatch::IntegrationTest
 
     json_response = JSON.parse(@response.body)
     assert_equal "10000", json_response["rate"]
+    assert_equal RateSnapshot.read.fetched_at.iso8601, json_response["fetched_at"]
   end
 
   test "should return 503 when the rate API fails" do
@@ -45,6 +46,23 @@ class Api::V1::PricingControllerTest < ActionDispatch::IntegrationTest
 
     json_response = JSON.parse(@response.body)
     assert_includes json_response["error"], "temporarily unavailable"
+    assert_includes json_response["error"], "Upstream rejected the API token (401) — check RATE_API_TOKEN"
+  end
+
+  test "two requests inside the freshness window return the same fetched_at" do
+    stub_request(:post, RATE_API_PRICING_URL).to_return(status: 200, body: { rates: valid_rates_payload }.to_json)
+
+    travel_to(Time.zone.parse("2026-01-01 12:00:00")) do
+      get api_v1_pricing_url, params: { period: "Summer", hotel: "FloatingPointResort", room: "SingletonRoom" }
+      first_fetched_at = JSON.parse(@response.body)["fetched_at"]
+
+      get api_v1_pricing_url, params: { period: "Summer", hotel: "FloatingPointResort", room: "SingletonRoom" }
+      second_fetched_at = JSON.parse(@response.body)["fetched_at"]
+
+      assert_equal first_fetched_at, second_fetched_at
+    end
+
+    assert_requested :post, RATE_API_PRICING_URL, times: 1
   end
 
   test "logs a structured pricing.request line with cache: refreshed on a cold fetch" do

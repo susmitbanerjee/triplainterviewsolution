@@ -14,7 +14,10 @@ class Api::V1::PricingController < ApplicationController
     end
 
     cache_status = previous_snapshot&.fetched_at == snapshot.fetched_at ? "hit" : "refreshed"
-    render json: { rate: snapshot.rate_for(period: @query.period, hotel: @query.hotel, room: @query.room) }
+    render json: {
+      rate: snapshot.rate_for(period: @query.period, hotel: @query.hotel, room: @query.room),
+      fetched_at: snapshot.fetched_at.iso8601
+    }
     log_request(cache: cache_status, started_at:)
   end
 

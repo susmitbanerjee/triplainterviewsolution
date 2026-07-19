@@ -4,7 +4,7 @@ require "test_helper"
 # condition PricingClient can raise for must surface as a 503 with a
 # condition-appropriate message, must never mutate a previously stored
 # snapshot, and must respect PricingClient's retry policy (one retry for
-# timeout/connection/5xx, zero for 4xx and malformed-200 conditions).
+# timeout/connection/5xx/content-validation failures, zero for 4xx).
 class Api::V1::PricingControllerUpstreamFailuresTest < ActionDispatch::IntegrationTest
   PRICING_UPSTREAM_URL = "#{Rails.application.config.x.rate_api.url}/pricing".freeze
   VALID_PARAMS = { period: "Summer", hotel: "FloatingPointResort", room: "SingletonRoom" }.freeze
@@ -74,30 +74,39 @@ class Api::V1::PricingControllerUpstreamFailuresTest < ActionDispatch::Integrati
     end
   end
 
-  test "401 yields 503, leaves snapshot untouched, does not retry" do
-    assert_upstream_failure_yields_503(expected_request_count: 1, message_pattern: /401/) do
+  test "401 yields 503, leaves snapshot untouched, does not retry, and names the config problem" do
+    assert_upstream_failure_yields_503(expected_request_count: 1, message_pattern: /rejected the API token \(401\) — check RATE_API_TOKEN/) do
       stub_request(:post, PRICING_UPSTREAM_URL).to_return(status: 401, body: { error: "Unauthorized" }.to_json)
     end
   end
 
-  test "malformed JSON yields 503, leaves snapshot untouched, does not retry" do
-    assert_upstream_failure_yields_503(expected_request_count: 1, message_pattern: /JSON/i) do
+  test "malformed JSON yields 503, leaves snapshot untouched, retries exactly once" do
+    assert_upstream_failure_yields_503(expected_request_count: 2, message_pattern: /JSON/i) do
       stub_request(:post, PRICING_UPSTREAM_URL).to_return(status: 200, body: "{not valid json")
     end
   end
 
-  test "200 with 35 rates yields 503, leaves snapshot untouched, does not retry" do
-    assert_upstream_failure_yields_503(expected_request_count: 1, message_pattern: /35/) do
+  test "200 with 35 rates yields 503, leaves snapshot untouched, retries exactly once" do
+    assert_upstream_failure_yields_503(expected_request_count: 2, message_pattern: /35/) do
       payload = valid_rates_payload[0..-2]
       stub_request(:post, PRICING_UPSTREAM_URL).to_return(status: 200, body: { rates: payload }.to_json)
     end
   end
 
-  test "200 with a non-numeric rate yields 503, leaves snapshot untouched, does not retry" do
-    assert_upstream_failure_yields_503(expected_request_count: 1, message_pattern: /non-numeric/i) do
+  test "200 with a non-numeric rate yields 503, leaves snapshot untouched, retries exactly once" do
+    assert_upstream_failure_yields_503(expected_request_count: 2, message_pattern: /non-numeric/i) do
       payload = valid_rates_payload
       payload.first["rate"] = "not-a-number"
       stub_request(:post, PRICING_UPSTREAM_URL).to_return(status: 200, body: { rates: payload }.to_json)
+    end
+  end
+
+  test "fake-success (200 with an error-shaped body) yields 503, leaves snapshot untouched, retries exactly once" do
+    assert_upstream_failure_yields_503(expected_request_count: 2, message_pattern: /rates/i) do
+      stub_request(:post, PRICING_UPSTREAM_URL).to_return(
+        status: 200,
+        body: { message: "Failed to process rates due to an intermittent issue.", status: "error" }.to_json
+      )
     end
   end
 end

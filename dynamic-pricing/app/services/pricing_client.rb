@@ -4,6 +4,7 @@ class PricingClient
   class ConnectionError < Error; end
   class UpstreamError < Error; end
   class RateLimited < UpstreamError; end
+  class AuthenticationError < Error; end
   class InvalidResponse < Error; end
 
   OPEN_TIMEOUT = 2
@@ -15,8 +16,10 @@ class PricingClient
 
   UPSTREAM_CALLS_CACHE_PREFIX = "pricing:upstream_calls"
   UPSTREAM_CALLS_TTL = 48.hours
-  # Worst case under correct single-flight coordination is 288/day (one call
-  # per 5-minute window). Anything past 500 means that guarantee is broken.
+  # Worst case under correct single-flight coordination is 288 refresh
+  # windows/day x up to MAX_ATTEMPTS (2) attempts each = 576 calls, against a
+  # 1,000/day upstream budget. Anything past 500 means that guarantee is
+  # broken — something is causing more than one attempt sequence per window.
   UPSTREAM_CALLS_WARN_THRESHOLD = 500
 
   def self.fetch_all
@@ -32,41 +35,58 @@ class PricingClient
   end
 
   def fetch_all
-    handle_response(request_with_retries)
+    request_with_retries
   end
 
   private
 
-  # Retries only on timeout or 5xx, at most once total. 4xx (including 429,
-  # handled specially by the caller) never retries: a bad token or a blown
-  # daily quota won't heal by trying again, and retrying burns quota.
+  # Retries once on timeout, connection error, 5xx, or a content-validation
+  # failure (InvalidResponse) — recon (docs/recon-notes.md) shows the
+  # fake-success 200s that trip InvalidResponse are transient, roughly
+  # 5-10% of all calls, and succeed on an identical retry. Never retries
+  # 429 or other 4xx (401 included): a bad token or a blown daily quota
+  # won't heal by trying again, and retrying only burns more of the budget.
   def request_with_retries
-    response = nil
-
     MAX_ATTEMPTS.times do |i|
       attempt = i + 1
+      last_attempt = attempt == MAX_ATTEMPTS
 
       begin
         response = post_batch
       rescue ::Timeout::Error => e
-        raise Timeout, "Pricing upstream timed out after #{attempt} attempt(s): #{e.message}" if attempt == MAX_ATTEMPTS
+        raise Timeout, "Pricing upstream timed out after #{attempt} attempt(s): #{e.message}" if last_attempt
 
         sleep(jittered_delay)
         next
       rescue Errno::ECONNREFUSED => e
-        raise ConnectionError, "Pricing upstream connection failed after #{attempt} attempt(s): #{e.class}: #{e.message}" if attempt == MAX_ATTEMPTS
+        raise ConnectionError, "Pricing upstream connection failed after #{attempt} attempt(s): #{e.class}: #{e.message}" if last_attempt
 
         sleep(jittered_delay)
         next
       end
 
-      break unless server_error?(response)
-      break if attempt == MAX_ATTEMPTS
+      case response.code
+      when 429
+        raise RateLimited, "Upstream rate limit exceeded (429): #{response.body}"
+      when 401
+        raise AuthenticationError, "Upstream rejected the API token (401) — check RATE_API_TOKEN"
+      when 200
+        begin
+          return parse_rates(response.body)
+        rescue InvalidResponse
+          raise if last_attempt
 
-      sleep(jittered_delay)
+          sleep(jittered_delay)
+        end
+      else
+        if server_error?(response) && !last_attempt
+          sleep(jittered_delay)
+          next
+        end
+
+        raise UpstreamError, "Upstream returned unexpected status #{response.code}: #{response.body}"
+      end
     end
-
-    response
   end
 
   def post_batch
@@ -113,17 +133,6 @@ class PricingClient
 
   def server_error?(response)
     (500..599).cover?(response.code)
-  end
-
-  def handle_response(response)
-    case response.code
-    when 429
-      raise RateLimited, "Upstream rate limit exceeded (429): #{response.body}"
-    when 200
-      parse_rates(response.body)
-    else
-      raise UpstreamError, "Upstream returned unexpected status #{response.code}: #{response.body}"
-    end
   end
 
   def parse_rates(raw_body)
