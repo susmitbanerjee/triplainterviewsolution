@@ -54,8 +54,12 @@ Rails.application.configure do
   # want to log everything, set the level to "debug".
   config.log_level = ENV.fetch("RAILS_LOG_LEVEL", "info")
 
-  # Use a different cache store in production.
-  # config.cache_store = :mem_cache_store
+  # RateRefresher's lock (Rails.cache.write ..., unless_exist: true) needs an
+  # atomic cross-process set-if-absent to mean anything; FileStore (Rails'
+  # default here otherwise) doesn't give that. Paired with the single-process
+  # pin in config/puma.rb (workers 0), :memory_store matches this app's
+  # actual deployment shape.
+  config.cache_store = :memory_store
 
   # Use a real queuing backend for Active Job (and separate queues per environment).
   # config.active_job.queue_adapter = :resque

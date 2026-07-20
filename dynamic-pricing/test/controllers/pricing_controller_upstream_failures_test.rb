@@ -115,4 +115,27 @@ class Api::V1::PricingControllerUpstreamFailuresTest < ActionDispatch::Integrati
       )
     end
   end
+
+  test "a second request during the failure cooldown 503s fast with Retry-After and a distinct message, without hitting upstream again" do
+    seed_stale_snapshot
+    stub_request(:post, PRICING_UPSTREAM_URL).to_return(status: 500, body: { error: "boom" }.to_json)
+
+    get api_v1_pricing_url, params: VALID_PARAMS
+    assert_response :service_unavailable
+    assert_requested :post, PRICING_UPSTREAM_URL, times: 2
+
+    get api_v1_pricing_url, params: VALID_PARAMS
+
+    assert_response :service_unavailable
+    assert_requested :post, PRICING_UPSTREAM_URL, times: 2 # no additional requests
+
+    retry_after = @response.headers["Retry-After"]
+    assert retry_after, "expected a Retry-After header during cooldown"
+    assert_operator retry_after.to_i, :>, 0
+    assert_operator retry_after.to_i, :<=, RateRefresher::FAILURE_COOLDOWN.to_i
+
+    json_response = JSON.parse(@response.body)
+    assert_includes json_response["error"], "cooldown"
+    assert_not_includes json_response["error"], "no refresh completed within"
+  end
 end

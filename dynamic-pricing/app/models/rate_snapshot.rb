@@ -20,8 +20,8 @@ class RateSnapshot
 
   def self.write(rates_hash)
     snapshot = new(fetched_at: Time.current, rates: rates_hash)
-    Rails.cache.write(CACHE_KEY, snapshot, expires_in: CACHE_TTL)
-    snapshot
+    written = Rails.cache.write(CACHE_KEY, snapshot, expires_in: CACHE_TTL)
+    written ? snapshot : nil
   end
 
   def self.read

@@ -7,9 +7,12 @@ class Api::V1::PricingController < ApplicationController
 
     begin
       snapshot = RateRefresher.ensure_fresh!
+    rescue RateRefresher::CoolingDown => e
+      response.headers["Retry-After"] = e.retry_after.to_s
+      render_unavailable(e.message, started_at:)
+      return
     rescue RateRefresher::Error => e
-      render json: { error: "Pricing data is temporarily unavailable: #{e.message}" }, status: :service_unavailable
-      log_request(cache: "unavailable", started_at:)
+      render_unavailable(e.message, started_at:)
       return
     end
 
@@ -29,6 +32,11 @@ class Api::V1::PricingController < ApplicationController
     unless @query.valid?
       render json: { error: @query.errors.first }, status: :unprocessable_content
     end
+  end
+
+  def render_unavailable(message, started_at:)
+    render json: { error: "Pricing data is temporarily unavailable: #{message}" }, status: :service_unavailable
+    log_request(cache: "unavailable", started_at:)
   end
 
   def log_request(cache:, started_at:)

@@ -21,6 +21,20 @@ class RateSnapshotTest < ActiveSupport::TestCase
     end
   end
 
+  test "write returns the snapshot when the underlying cache write succeeds" do
+    result = RateSnapshot.write(sample_rates)
+
+    assert_kind_of RateSnapshot, result
+    assert_equal sample_rates, result.rates
+  end
+
+  test "write returns nil when the underlying cache write fails" do
+    Rails.cache.stub(:write, false) do
+      result = RateSnapshot.write(sample_rates)
+      assert_nil result
+    end
+  end
+
   test "rate_for returns the rate for a known combination and nil for an unknown one" do
     travel_to(BASE_TIME) do
       RateSnapshot.write(sample_rates)

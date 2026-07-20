@@ -41,4 +41,29 @@ class PricingDailyTrafficTest < ActionDispatch::IntegrationTest
     # and only goes stale by N+2 — real calls happen every other window.
     assert_requested :post, PRICING_UPSTREAM_URL, times: actual_calls
   end
+
+  # This is the test the success-path one above should have been read
+  # alongside: without RateRefresher's failure cooldown, a persistently
+  # failing upstream turns "at most once per 5-minute window" into "at most
+  # once per REQUEST" — the snapshot never becomes fresh, so every single
+  # request would have been a new winner attempting its own 2-call sequence,
+  # and the 1,000/day quota would be gone in about an hour of steady
+  # traffic. The cooldown marker is what keeps this bounded even though
+  # upstream never once succeeds for the entire simulated day.
+  test "a full simulated day of steady traffic with upstream failing 100% of the time keeps the upstream-call counter within the 576 worst-case bound" do
+    stub_request(:post, PRICING_UPSTREAM_URL).to_return(status: 500, body: { error: "boom" }.to_json)
+
+    base = Time.zone.parse("2026-01-01 00:00:00")
+
+    WINDOWS_PER_DAY.times do |window|
+      travel_to(base + (window * 5).minutes) do
+        REQUESTS_PER_WINDOW.times { get api_v1_pricing_url, params: VALID_PARAMS }
+      end
+    end
+
+    actual_calls = travel_to(base) { PricingClient.upstream_calls_today }
+
+    assert_operator actual_calls, :<=, 2 * WINDOWS_PER_DAY
+    assert_requested :post, PRICING_UPSTREAM_URL, times: actual_calls
+  end
 end

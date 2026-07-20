@@ -19,6 +19,7 @@ rails_env = ENV.fetch("RAILS_ENV") { "development" }
 # cycles/day) assumes one process. Scaling to clustered mode requires moving
 # Rails.cache to a shared store (Redis), at which point the same unless_exist
 # lock becomes a true distributed SET NX EX with no other code changes.
+workers 0
 preload_app! if rails_env == "production"
 
 # Specifies the `worker_timeout` threshold that Puma will use to wait before
