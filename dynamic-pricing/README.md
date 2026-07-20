@@ -302,7 +302,7 @@ If `docker compose up` refuses to start and complains that `RATE_API_TOKEN` is r
 docker compose exec interview-dev ./bin/rails test
 ```
 
-That's 79 tests, 285 assertions, all green, roughly 115 seconds. Nearly all of it is
+That's 81 tests, 290 assertions, all green, roughly 115 seconds. Nearly all of it is
 spent in `test/controllers/pricing_daily_traffic_test.rb`'s pair of deliberately slow tests,
 each replaying a full simulated day of traffic (288 windows, several requests each)
 through the actual endpoint. One runs against a healthy upstream and checks the
